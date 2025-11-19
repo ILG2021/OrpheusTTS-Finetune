@@ -1,0 +1,7 @@
+click
+datasets
+snac
+transformers
+unsloth
+librosa
+tensorboard

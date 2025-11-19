@@ -1,12 +1,16 @@
 import locale
+import os.path
+import traceback
 
+import datasets
+from unsloth import FastLanguageModel
 import click
+import numpy as np
 import torch
 import torchaudio.transforms as T
 from datasets import load_dataset
 from snac import SNAC
 from transformers import TrainingArguments, Trainer, DataCollatorForSeq2Seq
-from unsloth import FastLanguageModel
 
 
 def get_optimal_training_config(num_samples):
@@ -122,49 +126,6 @@ def finetune(data_file, output_dir, batch_size, gradient_accumulation, epochs,
     )
     print("✓ LoRA configured\n")
 
-    # Load dataset
-    print(f"Loading dataset from {data_file}...")
-    dataset = load_dataset("json", data_files=data_file, split="train")
-    locale.getpreferredencoding = lambda: "UTF-8"
-
-    initial_sample_count = len(dataset)
-    print(f"✓ Dataset loaded: {initial_sample_count} samples\n")
-
-    # Check if audio field contains paths or actual audio data
-    first_audio = dataset[0]["audio"]
-    audio_is_path = isinstance(first_audio, str)
-
-    if audio_is_path:
-        print("Detected audio paths in dataset. Loading audio files...")
-        import librosa
-
-        def load_audio_file(example):
-            """Load audio from file path"""
-            try:
-                audio_path = example["audio"]
-                # Load audio using librosa
-                waveform, sample_rate = librosa.load(audio_path, sr=None, mono=True)
-                example["audio"] = {
-                    "array": waveform,
-                    "sampling_rate": sample_rate
-                }
-            except Exception as e:
-                print(f"⚠ Error loading audio file {example.get('audio', 'unknown')}: {e}")
-                example["audio"] = None
-            return example
-
-        dataset = dataset.map(load_audio_file, desc="Loading audio files")
-
-        # Filter out failed audio loads
-        dataset = dataset.filter(lambda x: x["audio"] is not None)
-        print(f"✓ Audio files loaded: {len(dataset)} successful\n")
-
-        if len(dataset) == 0:
-            raise ValueError("No audio files could be loaded. Please check your file paths.")
-
-    ds_sample_rate = dataset[0]["audio"]["sampling_rate"]
-    print(f"✓ Sample rate: {ds_sample_rate} Hz\n")
-
     # Load SNAC audio codec model
     print("Loading SNAC audio codec (24kHz)...")
     snac_model = SNAC.from_pretrained("hubertsiuzdak/snac_24khz")
@@ -172,58 +133,106 @@ def finetune(data_file, output_dir, batch_size, gradient_accumulation, epochs,
     snac_model.eval()
     print("✓ SNAC model loaded\n")
 
-    def tokenise_audio(waveform):
-        """Convert audio waveform to SNAC tokens"""
-        waveform = torch.from_numpy(waveform).unsqueeze(0)
-        waveform = waveform.to(dtype=torch.float32)
+    if os.path.exists("./preprocess_cache"):
+        dataset = datasets.load_from_disk("./preprocess_cache")
+    else:
+        # Load dataset
+        print(f"Loading dataset from {data_file}...")
+        dataset = load_dataset("json", data_files=data_file, split="train")
+        locale.getpreferredencoding = lambda: "UTF-8"
 
-        if ds_sample_rate != 24000:
-            resample_transform = T.Resample(orig_freq=ds_sample_rate, new_freq=24000)
-            waveform = resample_transform(waveform)
+        initial_sample_count = len(dataset)
+        print(f"✓ Dataset loaded: {initial_sample_count} samples\n")
 
-        waveform = waveform.unsqueeze(0).to("cuda")
+        # Check if audio field contains paths or actual audio data
+        first_audio = dataset[0]["audio"]
+        audio_is_path = isinstance(first_audio, str)
 
-        with torch.inference_mode():
-            codes = snac_model.encode(waveform)
+        if audio_is_path:
+            print("Detected audio paths in dataset. Loading audio files...")
+            import librosa
 
-        all_codes = []
-        for i in range(codes[0].shape[1]):
-            all_codes.append(codes[0][0][i].item() + 128266)
-            all_codes.append(codes[1][0][2 * i].item() + 128266 + 4096)
-            all_codes.append(codes[2][0][4 * i].item() + 128266 + (2 * 4096))
-            all_codes.append(codes[2][0][(4 * i) + 1].item() + 128266 + (3 * 4096))
-            all_codes.append(codes[1][0][(2 * i) + 1].item() + 128266 + (4 * 4096))
-            all_codes.append(codes[2][0][(4 * i) + 2].item() + 128266 + (5 * 4096))
-            all_codes.append(codes[2][0][(4 * i) + 3].item() + 128266 + (6 * 4096))
+            def load_audio_file(example):
+                """Load audio from file path"""
+                try:
+                    audio_path = example["audio"]
+                    # Load audio using librosa
+                    waveform, sample_rate = librosa.load(audio_path, sr=None, mono=True)
+                    example["audio"] = {
+                        "array": waveform,
+                        "sampling_rate": sample_rate
+                    }
+                except Exception as e:
+                    print(f"⚠ Error loading audio file {example.get('audio', 'unknown')}: {e}")
+                    example["audio"] = None
+                return example
 
-        return all_codes
+            dataset = dataset.map(load_audio_file, desc="Loading audio files")
 
-    failed_count = 0
+            # Filter out failed audio loads
+            dataset = dataset.filter(lambda x: x["audio"] is not None)
+            print(f"✓ Audio files loaded: {len(dataset)} successful\n")
 
-    def add_codes(example):
-        """Process audio and add SNAC codes to example"""
-        nonlocal failed_count
-        codes_list = None
+            if len(dataset) == 0:
+                raise ValueError("No audio files could be loaded. Please check your file paths.")
 
-        try:
-            answer_audio = example.get("audio")
-            if answer_audio and "array" in answer_audio:
-                audio_array = answer_audio["array"]
-                codes_list = tokenise_audio(audio_array)
-        except Exception as e:
-            print(f"⚠ Error processing audio: {e}")
-            failed_count += 1
+        ds_sample_rate = dataset[0]["audio"]["sampling_rate"]
+        print(f"✓ Sample rate: {ds_sample_rate} Hz\n")
 
-        example["codes_list"] = codes_list
-        return example
+        def tokenise_audio(waveform):
+            """Convert audio waveform to SNAC tokens"""
+            waveform = torch.from_numpy(np.array(waveform)).unsqueeze(0)
+            waveform = waveform.to(dtype=torch.float32)
 
-    # Process all audio files to SNAC codes
-    print("Processing audio files to SNAC codes...")
-    dataset = dataset.map(add_codes, remove_columns=["audio"], desc="Encoding audio")
+            if ds_sample_rate != 24000:
+                resample_transform = T.Resample(orig_freq=ds_sample_rate, new_freq=24000)
+                waveform = resample_transform(waveform)
 
-    if failed_count > 0:
-        print(f"⚠ Failed to process {failed_count} samples")
-    print(f"✓ Audio processing complete\n")
+            waveform = waveform.unsqueeze(0).to("cuda")
+
+            with torch.inference_mode():
+                codes = snac_model.encode(waveform)
+
+            all_codes = []
+            for i in range(codes[0].shape[1]):
+                all_codes.append(codes[0][0][i].item() + 128266)
+                all_codes.append(codes[1][0][2 * i].item() + 128266 + 4096)
+                all_codes.append(codes[2][0][4 * i].item() + 128266 + (2 * 4096))
+                all_codes.append(codes[2][0][(4 * i) + 1].item() + 128266 + (3 * 4096))
+                all_codes.append(codes[1][0][(2 * i) + 1].item() + 128266 + (4 * 4096))
+                all_codes.append(codes[2][0][(4 * i) + 2].item() + 128266 + (5 * 4096))
+                all_codes.append(codes[2][0][(4 * i) + 3].item() + 128266 + (6 * 4096))
+
+            return all_codes
+
+        failed_count = 0
+
+        def add_codes(example):
+            """Process audio and add SNAC codes to example"""
+            nonlocal failed_count
+            codes_list = None
+
+            try:
+                answer_audio = example.get("audio")
+                if answer_audio and "array" in answer_audio:
+                    audio_array = answer_audio["array"]
+                    codes_list = tokenise_audio(audio_array)
+            except Exception as e:
+                traceback.print_exc()
+                print(f"⚠ Error processing audio: {e}")
+                failed_count += 1
+
+            example["codes_list"] = codes_list
+            return example
+
+        # Process all audio files to SNAC codes
+        print("Processing audio files to SNAC codes...")
+        dataset = dataset.map(add_codes, remove_columns=["audio"], desc="Encoding audio")
+        dataset.save_to_disk("./preprocess_cache")
+
+        if failed_count > 0:
+            print(f"⚠ Failed to process {failed_count} samples")
+        print(f"✓ Audio processing complete\n")
 
     # Free SNAC model from GPU memory
     print("Releasing SNAC model from GPU...")
