@@ -242,9 +242,10 @@ def process_line(model, tokenizer, snac_model, line, speaker, chunk_size,
 @click.option("--temperature", default=0.6, type=float, help="Sampling temperature")
 @click.option("--top_p", default=0.95, type=float, help="Top-p sampling")
 @click.option("--repetition_penalty", default=1.1, type=float, help="Repetition penalty")
+@click.option("--max_seq_length", default=2048, help="Maximum sequence length")
 def inference(model_path, text_file, output_dir, speaker, chunk_size, line_silence,
               chunk_silence, save_lines, merge_all, max_new_tokens, temperature, top_p,
-              repetition_penalty):
+              repetition_penalty, max_seq_length):
     """
     使用微调后的 Orpheus TTS 模型进行分行文本语音合成
     文本文件每行独立生成，超长行自动分块
@@ -289,7 +290,7 @@ def inference(model_path, text_file, output_dir, speaker, chunk_size, line_silen
     print("Loading base model (orpheus-3b-0.1-ft)...")
     model, tokenizer = FastLanguageModel.from_pretrained(
         model_name="unsloth/orpheus-3b-0.1-ft",
-        max_seq_length=2048,
+        max_seq_length=max_seq_length,
         dtype="bfloat16",
         load_in_4bit=False,
         load_in_8bit=False,
