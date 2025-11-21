@@ -1,7 +1,9 @@
+import os
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
 import locale
 import os.path
 import traceback
-
 import datasets
 from unsloth import FastLanguageModel
 import click
@@ -79,7 +81,7 @@ def get_optimal_training_config(num_samples):
 
 @click.command()
 @click.option("--data_file", required=True, help="Path to training data JSON file")
-@click.option("--output_dir", default="lora_model", help="Output directory for model")
+@click.option("--output_dir", default="ckpts", help="Output directory for model")
 @click.option("--batch_size", default=None, type=int, help="Training batch size (auto if not set)")
 @click.option("--gradient_accumulation", default=None, type=int, help="Gradient accumulation steps (auto if not set)")
 @click.option("--epochs", default=None, type=int, help="Number of training epochs (auto if not set)")
@@ -87,9 +89,12 @@ def get_optimal_training_config(num_samples):
 @click.option("--lr_scheduler", default=None, type=str,
               help="LR scheduler: linear/cosine/cosine_with_restarts (auto if not set)")
 @click.option("--max_seq_length", default=2048, help="Maximum sequence length")
-@click.option("--auto_config", is_flag=True, default=True, help="Auto-configure based on dataset size")
+@click.option("--auto_config", default=True, help="Auto-configure based on dataset size")
+@click.option("--warmup_ratio",  default=None, type=float, help="Warmup ratio")
+@click.option("--save_steps",  default=None, type=int)
+@click.option("--eval_steps",  default=None, type=int)
 def finetune(data_file, output_dir, batch_size, gradient_accumulation, epochs,
-             learning_rate, lr_scheduler, max_seq_length, auto_config):
+             learning_rate, lr_scheduler, max_seq_length, auto_config, warmup_ratio, save_steps, eval_steps):
     print("=" * 70)
     print("Orpheus TTS Fine-tuning - RTX 5090 Optimized (BF16)")
     print("=" * 70)
@@ -111,13 +116,14 @@ def finetune(data_file, output_dir, batch_size, gradient_accumulation, epochs,
 
     # Configure LoRA for fine-tuning
     print("Configuring LoRA adapters...")
+
     model = FastLanguageModel.get_peft_model(
         model,
         r=64,
         target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
                         "gate_proj", "up_proj", "down_proj"],
-        lora_alpha=64,
-        lora_dropout=0,
+        lora_alpha=128,
+        lora_dropout=0.05,
         bias="none",
         use_gradient_checkpointing="unsloth",
         random_state=3407,
@@ -366,9 +372,9 @@ def finetune(data_file, output_dir, batch_size, gradient_accumulation, epochs,
         epochs = epochs or optimal_config["epochs"]
         learning_rate = learning_rate or optimal_config["learning_rate"]
         lr_scheduler = lr_scheduler or optimal_config["lr_scheduler"]
-        warmup_ratio = optimal_config["warmup_ratio"]
-        eval_steps = optimal_config["eval_steps"]
-        save_steps = optimal_config["save_steps"]
+        warmup_ratio = warmup_ratio or optimal_config["warmup_ratio"]
+        eval_steps = eval_steps or optimal_config["eval_steps"]
+        save_steps = save_steps or optimal_config["save_steps"]
 
         print(f"Dataset size: {final_sample_count} samples")
         print(f"Strategy: {optimal_config['note']}")
@@ -473,13 +479,13 @@ def finetune(data_file, output_dir, batch_size, gradient_accumulation, epochs,
             # Checkpointing
             save_strategy="steps",
             save_steps=save_steps,
-            save_total_limit=3,
+            save_total_limit=10,
             load_best_model_at_end=True,
             metric_for_best_model="loss",
             greater_is_better=False,
 
             # Output
-            output_dir="outputs",
+            output_dir=output_dir,
             overwrite_output_dir=True,
 
             # Reporting
@@ -530,7 +536,6 @@ def finetune(data_file, output_dir, batch_size, gradient_accumulation, epochs,
         f.write("Orpheus TTS Fine-tuning Results\n")
         f.write("=" * 70 + "\n\n")
         f.write(f"Dataset Information:\n")
-        f.write(f"  • Initial samples: {initial_sample_count}\n")
         f.write(f"  • Final samples: {final_sample_count}\n")
         f.write(f"  • Training samples: {len(train_dataset)}\n")
         f.write(f"  • Validation samples: {len(eval_dataset)}\n\n")
