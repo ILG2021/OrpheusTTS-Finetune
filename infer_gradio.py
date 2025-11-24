@@ -312,7 +312,7 @@ with gr.Blocks(title="Orpheus TTS") as demo:
     generate_btn = gr.Button("🎵 生成语音", variant="primary", size="lg")
 
     with gr.Row():
-        audio_output = gr.Audio(label="生成的音频", type="filepath")
+        audio_output = gr.Audio(label="生成的音频", type="filepath",interactive=True, buttons=['download'])
         log_output = gr.Textbox(label="生成日志", lines=10, interactive=False)
 
     # 绑定事件
@@ -332,4 +332,4 @@ with gr.Blocks(title="Orpheus TTS") as demo:
     )
 
 if __name__ == "__main__":
-    demo.launch(share=False, server_name="0.0.0.0", server_port=7860)
+    demo.launch(share=False, server_name="0.0.0.0", root_path="https://orp.portal.1395812.xyz/")
