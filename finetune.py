@@ -1,4 +1,18 @@
+import io
 import os
+import sys
+
+from pandas.compat import is_platform_windows
+
+if sys.platform == 'win32':
+    # 1. 禁用 torch.compile (修复 MSVC 编码错误)
+    os.environ["TORCH_COMPILE_DISABLE"] = "1"
+    os.environ["TORCHINDUCTOR_CPP_WRAPPER"] = "0"
+
+    # 2. 修复编码问题
+    os.environ['PYTHONIOENCODING'] = 'utf-8'
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 import locale
@@ -103,6 +117,14 @@ def finetune(data_file, output_dir, batch_size, gradient_accumulation, epochs,
     print(f"Auto-configuration: {'Enabled' if auto_config else 'Disabled'}")
     print("=" * 70 + "\n")
 
+    gpu_memory_gb = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
+    print(f"gpu memory: {gpu_memory_gb} GB" )
+    if gpu_memory_gb < 24:
+        lora_r = 32
+        lora_a  = 64
+    else:
+        lora_r = 64
+        lora_a = 128
     # Load model with BF16 for best quality on RTX 5090
     print("Loading model in BF16 precision...")
     model, tokenizer = FastLanguageModel.from_pretrained(
@@ -119,11 +141,11 @@ def finetune(data_file, output_dir, batch_size, gradient_accumulation, epochs,
 
     model = FastLanguageModel.get_peft_model(
         model,
-        r=64,
+        r=lora_r,
         target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
                         "gate_proj", "up_proj", "down_proj"],
-        lora_alpha=128,
-        lora_dropout=0.05,
+        lora_alpha=lora_a,
+        # lora_dropout=0.05,
         bias="none",
         use_gradient_checkpointing="unsloth",
         random_state=3407,
@@ -407,7 +429,7 @@ def finetune(data_file, output_dir, batch_size, gradient_accumulation, epochs,
 
     # Split into train/validation sets
     print("Splitting dataset (95% train, 5% validation)...")
-    dataset_split = dataset.train_test_split(test_size=0.05, seed=3407)
+    dataset_split = dataset.train_test_split(test_size=0.01, seed=3407)
     train_dataset = dataset_split["train"]
     eval_dataset = dataset_split["test"]
 
@@ -496,7 +518,7 @@ def finetune(data_file, output_dir, batch_size, gradient_accumulation, epochs,
             data_seed=3407,
 
             # Performance
-            dataloader_num_workers=4,
+            dataloader_num_workers=0 if is_platform_windows() else 4,
             dataloader_pin_memory=True,
 
             # Disable features we don't need
@@ -512,16 +534,10 @@ def finetune(data_file, output_dir, batch_size, gradient_accumulation, epochs,
     print(f"Monitor training with: tensorboard --logdir outputs")
     print(f"Press Ctrl+C to interrupt training safely\n")
 
-    try:
-        trainer.train()
-        print("\n" + "=" * 70)
-        print("✓ TRAINING COMPLETED SUCCESSFULLY!")
-        print("=" * 70 + "\n")
-    except KeyboardInterrupt:
-        print("\n⚠ Training interrupted by user")
-    except Exception as e:
-        print(f"\n❌ Training failed with error: {e}")
-        raise
+    trainer.train()
+    print("\n" + "=" * 70)
+    print("✓ TRAINING COMPLETED SUCCESSFULLY!")
+    print("=" * 70 + "\n")
 
     # Save final model
     print(f"Saving model to {output_dir}...")
@@ -564,4 +580,7 @@ def finetune(data_file, output_dir, batch_size, gradient_accumulation, epochs,
 
 
 if __name__ == '__main__':
+    import multiprocessing
+
+    multiprocessing.freeze_support()
     finetune()

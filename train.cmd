@@ -1,0 +1,11 @@
+python finetune.py `
+  --data_file "你的数据文件.json" `
+  --auto_config False `
+  --batch_size 8 `
+  --gradient_accumulation 4 `
+  --epochs 10 `
+  --learning_rate 1e-4 `
+  --lr_scheduler cosine `
+  --warmup_ratio 0.05 `
+  --save_steps 200 `
+  --eval_steps 200
